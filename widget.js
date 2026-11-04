@@ -133,6 +133,7 @@
   const toggleMappingPanelBtn = document.getElementById("toggleMappingPanelBtn");
   const mappingPanelEl = document.getElementById("mappingPanel");
   const debugPanelEl = document.getElementById("debugPanel");
+  const paneDivider = document.getElementById("paneDivider");
   const timelineViewBtn = document.getElementById("timelineViewBtn");
   const addLevel1Btn = document.getElementById("addLevel1Btn");
   const tableViewEl = document.getElementById("tableView");
@@ -845,7 +846,7 @@
   function scopedTimelineNodes() {
     const scope = nodeById.get(timelineScopeId);
     if (!scope) return [];
-    const nodes = ancestorChainForNode(scope);
+    const nodes = [scope];
     function addDescendants(node) {
       for (const child of node.children) {
         nodes.push(child);
@@ -857,11 +858,11 @@
   }
 
   function refreshTimelineRange(reset = false) {
-    const nodes = scopedTimelineNodes();
-    const ancestorIds = new Set(ancestorChainForNode(nodeById.get(timelineScopeId)).slice(0, -1).map((node) => node.id));
-    const range = computeGlobalRange(nodes.map((node) => ancestorIds.has(node.id)
-      ? { startDate: node.startDate, endDate: node.endDate }
-      : node));
+    if (!nodeById.has(timelineScopeId)) {
+      timelineScopeId = [...treeRoots].sort(compareNodesForTimeline)[0]?.id ?? null;
+      reset = true;
+    }
+    const range = computeGlobalRange(scopedTimelineNodes());
     globalMinDate = range.min;
     globalMaxDate = range.max;
     if (reset || zoomMode === "all") setVisibleRangeForZoom();
@@ -874,17 +875,14 @@
       const children = sortedTimelineChildren(node);
       tracks.push({ kind: "node", node });
       if (!isNodeExpanded(node)) return;
-      if (compactChildren && children.length && children.every((c) => !c.children.length)) {
+      if (compactChildren && children.length && children.every((c) => !c.children.length && c.id !== selectedNodeId)) {
         tracks.push({ kind: "compact", parent: node, nodes: children });
       } else {
         children.forEach(walk);
       }
     }
     const scope = nodeById.get(timelineScopeId);
-    if (scope) {
-      for (const node of ancestorChainForNode(scope).slice(0, -1)) tracks.push({ kind: "node", node });
-      walk(scope);
-    }
+    if (scope) walk(scope);
     flatTracks = tracks;
     return tracks;
   }
@@ -2569,11 +2567,28 @@
   }
 
   function selectTimelineScope(nodeId) {
-    if (!nodeById.has(nodeId)) return;
-    timelineScopeId = nodeId;
+    const node = nodeById.get(nodeId);
+    if (!node) return;
+    const path = ancestorChainForNode(node);
+    const rootId = path[0].id;
+    const changedBranch = timelineScopeId !== rootId;
+    timelineScopeId = rootId;
     selectedNodeId = nodeId;
-    refreshTimelineRange(true);
-    render();
+    for (const ancestor of path.slice(0, -1)) expandedNodes[ancestor.id] = true;
+    refreshTimelineRange(changedBranch);
+    const start = node.startDate || node.milestoneDate || node.aggStart;
+    const end = node.endDate || node.milestoneDate || node.aggEnd || start;
+    if (start && end && visibleStart && visibleEnd && (end < visibleStart || start > visibleEnd)) {
+      const range = positionRangeAroundReferenceDate(start, diffInDays(visibleStart, visibleEnd) + 1);
+      visibleStart = range.start;
+      visibleEnd = range.end;
+      keepOrRecomputeVisibleRange();
+    }
+    if (viewMode === "timeline") {
+      renderTimelinePane();
+      taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
+    }
+    applyNodeSelectionClasses();
   }
 
   function updateTimelineDateSortSelect() {
@@ -2594,6 +2609,8 @@
     timelineViewBtn?.setAttribute("aria-pressed", String(viewMode === "timeline"));
     if (timelineViewBtn) timelineViewBtn.textContent = viewMode === "timeline" ? "Masquer la timeline" : "Afficher la timeline";
     if (ganttContainer) ganttContainer.hidden = viewMode !== "timeline";
+    if (paneDivider) paneDivider.hidden = viewMode !== "timeline";
+    document.body.classList.toggle("timeline-hidden", viewMode !== "timeline");
     if (tableViewEl) tableViewEl.hidden = false;
     if (addLevel1Btn) {
       addLevel1Btn.hidden = true;
@@ -2950,22 +2967,24 @@
     }
     initColorFieldSelect();
     TableView.renderTableView();
-    if (viewMode === "timeline") {
-      TimelineView.renderTaskList();
-      if (!nodeById.has(timelineScopeId)) {
-        resetTimelineViewportForNoDateRange();
-        timelineGridEl.innerHTML = '<div class="empty">Sélectionnez une ligne dans la table pour afficher sa timeline.</div>';
-      } else if (hasLoadedRecordsWithoutDates()) {
-        renderNoDateRangeMessage();
-      } else {
-        TimelineView.buildHeaders();
-        TimelineView.renderTimeline();
-      }
-    }
+    if (viewMode === "timeline") renderTimelinePane();
     refreshTableInfo();
     updateExpandAllButton();
   }
 
+
+  function renderTimelinePane() {
+    TimelineView.renderTaskList();
+    if (!nodeById.has(timelineScopeId)) {
+      resetTimelineViewportForNoDateRange();
+      timelineGridEl.innerHTML = '<div class="empty">Sélectionnez une ligne dans la table pour afficher sa timeline.</div>';
+    } else if (hasLoadedRecordsWithoutDates()) {
+      renderNoDateRangeMessage();
+    } else {
+      TimelineView.buildHeaders();
+      TimelineView.renderTimeline();
+    }
+  }
 
   function setViewMode(mode) {
     viewMode = mode;
@@ -3078,7 +3097,7 @@
       }
 
       const row = e.target.closest("tr[data-node-id]");
-      if (row && !e.target.closest(".table-cell-editor")) selectTimelineScope(row.dataset.nodeId);
+      if (row) selectTimelineScope(row.dataset.nodeId);
     });
 
     hierarchyTableWrapEl?.addEventListener("change", async (e) => {
@@ -3166,6 +3185,30 @@
     toggleAllNodes,
     handleAddLevel1,
     get viewMode() { return viewMode; }
+  });
+
+  function setTablePaneHeight(height) {
+    const tableTop = tableViewEl.getBoundingClientRect().top;
+    const available = Math.max(0, document.documentElement.clientHeight - tableTop - paneDivider.offsetHeight);
+    const minimum = Math.min(72, available / 3);
+    const maximum = Math.max(minimum, available - Math.min(145, available / 2));
+    const next = Math.max(minimum, Math.min(height, maximum));
+    document.body.style.setProperty("--table-height", `${next}px`);
+    paneDivider.setAttribute("aria-valuenow", String(Math.round(100 * next / (available || 1))));
+  }
+
+  paneDivider?.addEventListener("pointerdown", (event) => {
+    if (event.button === 0) paneDivider.setPointerCapture(event.pointerId);
+  });
+  paneDivider?.addEventListener("pointermove", (event) => {
+    if (paneDivider.hasPointerCapture(event.pointerId)) {
+      setTablePaneHeight(event.clientY - tableViewEl.getBoundingClientRect().top);
+    }
+  });
+  paneDivider?.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    setTablePaneHeight(tableViewEl.getBoundingClientRect().height + (event.key === "ArrowUp" ? -24 : 24));
   });
 
   timelineViewBtn?.addEventListener("click", () => Controller.setViewMode(viewMode === "timeline" ? "table" : "timeline"));
