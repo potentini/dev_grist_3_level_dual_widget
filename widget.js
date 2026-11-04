@@ -3363,6 +3363,15 @@
   });
   expandAllBtn.addEventListener("click", toggleAllNodes);
   tableExpandAllBtn?.addEventListener("click", toggleAllNodes);
+  document.getElementById("tableSelectAllBtn")?.addEventListener("click", () => {
+    const rows = hasActiveTableFilters() ? allRecords.filter(nodeMatchesTableFilters) : allRecords;
+    if (!rows.length) return;
+    tableSelection = new Set(rows.map((node) => node.id));
+    tableSelectionAnchor = null;
+    selectedNodeId = null;
+    refreshTimelineRange();
+    render();
+  });
   colorFieldSelect.addEventListener("change", (e) => { colorField = e.target.value; saveState(); render(); });
   tableFieldSelectBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
