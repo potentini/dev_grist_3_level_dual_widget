@@ -73,7 +73,9 @@
   let compactChildren = false;
   let allowEditing = false;
   let viewMode = "timeline";
-  let timelineScopeId = null;
+  let timelineScopes = [];
+  let tableSelection = new Set();
+  let tableSelectionAnchor = null;
   let timelineSortField = "default";
   let tableVisibleFields = [...TABLE_DEFAULT_VISIBLE_FIELDS];
   let tableColumnFilters = {};
@@ -844,24 +846,26 @@
   }
 
   function scopedTimelineNodes() {
-    const scope = nodeById.get(timelineScopeId);
-    if (!scope) return [];
-    const nodes = [scope];
+    const nodes = [];
     function addDescendants(node) {
-      for (const child of node.children) {
-        nodes.push(child);
-        addDescendants(child);
-      }
+      nodes.push(node);
+      node.children.forEach(addDescendants);
     }
-    addDescendants(scope);
+    timelineScopes.forEach(addDescendants);
     return nodes;
   }
 
   function refreshTimelineRange(reset = false) {
-    if (!nodeById.has(timelineScopeId)) {
-      timelineScopeId = [...treeRoots].sort(compareNodesForTimeline)[0]?.id ?? null;
-      reset = true;
+    const roots = new Set();
+    for (const id of tableSelection) {
+      const root = ancestorChainForNode(nodeById.get(id))[0];
+      if (root) roots.add(root);
     }
+    if (!roots.size && treeRoots.length) roots.add([...treeRoots].sort(compareNodesForTimeline)[0]);
+    const nextScopes = [...roots].sort(compareNodesForTimeline);
+    reset ||= nextScopes.length !== timelineScopes.length
+      || nextScopes.some((root, index) => root.id !== timelineScopes[index].id);
+    timelineScopes = nextScopes;
     const range = computeGlobalRange(scopedTimelineNodes());
     globalMinDate = range.min;
     globalMaxDate = range.max;
@@ -875,14 +879,13 @@
       const children = sortedTimelineChildren(node);
       tracks.push({ kind: "node", node });
       if (!isNodeExpanded(node)) return;
-      if (compactChildren && children.length && children.every((c) => !c.children.length && c.id !== selectedNodeId)) {
+      if (compactChildren && children.length && children.every((c) => !c.children.length && !isNodeSelected(c.id))) {
         tracks.push({ kind: "compact", parent: node, nodes: children });
       } else {
         children.forEach(walk);
       }
     }
-    const scope = nodeById.get(timelineScopeId);
-    if (scope) walk(scope);
+    timelineScopes.forEach(walk);
     flatTracks = tracks;
     return tracks;
   }
@@ -1167,7 +1170,7 @@
 
       const node = track.node;
       const row = document.createElement("div");
-      row.className = `task-row ${node.children.length ? "parent-row" : "child-row"} level-${node.level}` + (selectedNodeId === node.id ? " selected" : "");
+      row.className = `task-row ${node.children.length ? "parent-row" : "child-row"} level-${node.level}` + (isNodeSelected(node.id) ? " selected" : "");
       row.style.paddingLeft = `${8 + (node.level - 1) * 18}px`;
       row.dataset.nodeId = node.id;
       row.dataset.kind = "node";
@@ -2143,7 +2146,7 @@
         const x = frac * containerWidth;
         const centerY = trackIndex * rowHeight + rowHeight / 2;
         const m = document.createElement("div");
-        m.className = `gantt-milestone level-${node.level}` + (selectedNodeId === node.id ? " selected" : "");
+        m.className = `gantt-milestone level-${node.level}` + (isNodeSelected(node.id) ? " selected" : "");
         m.style.left = x.toFixed(1) + "px";
         m.style.top = centerY.toFixed(1) + "px";
         m.style.background = getColorForNode(node);
@@ -2174,7 +2177,7 @@
       const leftPx = leftFrac * containerWidth;
       const widthPx = widthFrac * containerWidth;
       const bar = document.createElement("div");
-      bar.className = `gantt-bar level-${node.level}` + (node.children.length ? " parent" : "") + (selectedNodeId === node.id ? " selected" : "");
+      bar.className = `gantt-bar level-${node.level}` + (node.children.length ? " parent" : "") + (isNodeSelected(node.id) ? " selected" : "");
       bar.style.left = leftPx.toFixed(1) + "px";
       bar.style.width = widthPx.toFixed(1) + "px";
       bar.style.top = trackIndex * rowHeight + 8 + "px";
@@ -2541,10 +2544,15 @@
     document.querySelectorAll(".selected[data-node-id]").forEach((el) => el.classList.remove("selected"));
   }
 
+  function isNodeSelected(id) {
+    return selectedNodeId === id || tableSelection.has(id);
+  }
+
   function applyNodeSelectionClasses() {
     clearNodeSelectionClasses();
-    if (!selectedNodeId) return;
-    document.querySelectorAll(`[data-node-id="${CSS.escape(selectedNodeId)}"]`).forEach((el) => el.classList.add("selected"));
+    document.querySelectorAll("[data-node-id]").forEach((el) => {
+      if (isNodeSelected(el.dataset.nodeId)) el.classList.add("selected");
+    });
   }
 
   function ancestorChainForNode(node) {
@@ -2566,19 +2574,34 @@
     setDebugAction(`Sélection locale ${node.source.tableId || "source"}#${node.source.rowId ?? "?"}`);
   }
 
-  function selectTimelineScope(nodeId) {
+  function selectTimelineScope(nodeId, extendSelection, toggleSelection) {
     const node = nodeById.get(nodeId);
     if (!node) return;
-    const path = ancestorChainForNode(node);
-    const rootId = path[0].id;
-    const changedBranch = timelineScopeId !== rootId;
-    timelineScopeId = rootId;
-    selectedNodeId = nodeId;
-    for (const ancestor of path.slice(0, -1)) expandedNodes[ancestor.id] = true;
-    refreshTimelineRange(changedBranch);
+    const rows = extendSelection ? visibleTableRows() : [];
+    const anchorIndex = rows.findIndex((row) => row.id === tableSelectionAnchor);
+    const clickedIndex = rows.findIndex((row) => row.id === nodeId);
+    if (toggleSelection) {
+      if (tableSelection.has(nodeId)) tableSelection.delete(nodeId);
+      else tableSelection.add(nodeId);
+      tableSelectionAnchor = nodeId;
+    } else if (anchorIndex >= 0 && clickedIndex >= 0) {
+      const first = Math.min(anchorIndex, clickedIndex);
+      const last = Math.max(anchorIndex, clickedIndex);
+      tableSelection = new Set(rows.slice(first, last + 1).map((row) => row.id));
+    } else {
+      tableSelection = new Set([nodeId]);
+      tableSelectionAnchor = nodeId;
+    }
+    selectedNodeId = tableSelection.has(nodeId) ? nodeId : null;
+    for (const id of tableSelection) {
+      for (const ancestor of ancestorChainForNode(nodeById.get(id)).slice(0, -1)) {
+        expandedNodes[ancestor.id] = true;
+      }
+    }
+    refreshTimelineRange();
     const start = node.startDate || node.milestoneDate || node.aggStart;
     const end = node.endDate || node.milestoneDate || node.aggEnd || start;
-    if (start && end && visibleStart && visibleEnd && (end < visibleStart || start > visibleEnd)) {
+    if (selectedNodeId && start && end && visibleStart && visibleEnd && (end < visibleStart || start > visibleEnd)) {
       const range = positionRangeAroundReferenceDate(start, diffInDays(visibleStart, visibleEnd) + 1);
       visibleStart = range.start;
       visibleEnd = range.end;
@@ -2586,7 +2609,7 @@
     }
     if (viewMode === "timeline") {
       renderTimelinePane();
-      taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
+      if (selectedNodeId) taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
     }
     applyNodeSelectionClasses();
   }
@@ -2710,9 +2733,12 @@
   function visibleTableRows() {
     const rows = [];
     const filtered = hasActiveTableFilters();
-    const selectedPath = new Set(ancestorChainForNode(nodeById.get(selectedNodeId)).map((node) => node.id));
+    const selectedPath = new Set();
+    for (const id of [...tableSelection, selectedNodeId]) {
+      for (const node of ancestorChainForNode(nodeById.get(id))) selectedPath.add(node.id);
+    }
     function walk(node) {
-      const matchesSelf = !filtered || node.id === selectedNodeId || nodeMatchesTableFilters(node);
+      const matchesSelf = !filtered || isNodeSelected(node.id) || nodeMatchesTableFilters(node);
       const matchesSubtree = !filtered || matchesSelf || (node.children || []).some(subtreeMatchesTableFilters) || selectedPath.has(node.id);
       if (!matchesSubtree) return;
       rows.push(node);
@@ -2891,7 +2917,7 @@
         ? `<button type="button" class="btn btn-small row-add-btn" data-add-child="${escapeHtml(node.id)}" ${canAddChild ? "" : "disabled"}>+ Niveau ${node.level + 1}</button>`
         : "";
       const deleteAction = `<button type="button" class="btn btn-small row-delete-btn" data-delete-node="${escapeHtml(node.id)}" ${canDeleteNode(node) ? "" : "disabled"}>Supprimer</button>`;
-      return `<tr class="level-${node.level}${selectedNodeId === node.id ? " selected" : ""}" data-node-id="${escapeHtml(node.id)}">${cells.join("")}<td class="table-actions-cell">${addAction}${deleteAction}</td></tr>`;
+      return `<tr class="level-${node.level}${isNodeSelected(node.id) ? " selected" : ""}" data-node-id="${escapeHtml(node.id)}">${cells.join("")}<td class="table-actions-cell">${addAction}${deleteAction}</td></tr>`;
     }).join("");
     hierarchyTableWrapEl.innerHTML = `<table class="hierarchy-table"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
   }
@@ -2931,6 +2957,7 @@
     setDebugSyncMode("docApi.applyUserActions (suppression table source)");
     setDebugAction(`Remove ${node.source.tableId}#${node.source.rowId}`);
     if (selectedNodeId === node.id) selectedNodeId = null;
+    tableSelection.delete(node.id);
     hideTooltip();
     await scheduleDirectMappingRefresh("write");
     showToast("Élément supprimé définitivement", "success");
@@ -2975,7 +3002,7 @@
 
   function renderTimelinePane() {
     TimelineView.renderTaskList();
-    if (!nodeById.has(timelineScopeId)) {
+    if (!timelineScopes.length) {
       resetTimelineViewportForNoDateRange();
       timelineGridEl.innerHTML = '<div class="empty">Sélectionnez une ligne dans la table pour afficher sa timeline.</div>';
     } else if (hasLoadedRecordsWithoutDates()) {
@@ -3097,7 +3124,11 @@
       }
 
       const row = e.target.closest("tr[data-node-id]");
-      if (row) selectTimelineScope(row.dataset.nodeId);
+      if (row) {
+        const toggleSelection = e.ctrlKey || e.metaKey;
+        if ((e.shiftKey || toggleSelection) && !e.target.closest(".table-cell-editor")) e.preventDefault();
+        selectTimelineScope(row.dataset.nodeId, e.shiftKey, toggleSelection);
+      }
     });
 
     hierarchyTableWrapEl?.addEventListener("change", async (e) => {
@@ -3332,6 +3363,15 @@
   });
   expandAllBtn.addEventListener("click", toggleAllNodes);
   tableExpandAllBtn?.addEventListener("click", toggleAllNodes);
+  document.getElementById("tableSelectAllBtn")?.addEventListener("click", () => {
+    const rows = hasActiveTableFilters() ? allRecords.filter(nodeMatchesTableFilters) : allRecords;
+    if (!rows.length) return;
+    tableSelection = new Set(rows.map((node) => node.id));
+    tableSelectionAnchor = null;
+    selectedNodeId = null;
+    refreshTimelineRange();
+    render();
+  });
   colorFieldSelect.addEventListener("change", (e) => { colorField = e.target.value; saveState(); render(); });
   tableFieldSelectBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
