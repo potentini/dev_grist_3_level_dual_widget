@@ -3,7 +3,8 @@
 Widget Grist dérivé du [widget Timeline](https://github.com/potentini/dev_grist_3_level_timeline_widget).
 
 - La table reste en haut. Le bouton **Afficher la timeline** ou **Masquer la timeline** contrôle le panneau inférieur.
-- Cliquez sur le libellé ou une zone non éditable d’une ligne pour afficher ses parents et ses descendants. Les branches voisines sont exclues.
+- Faites glisser la séparation pour régler la hauteur des panneaux. Les flèches haut et bas fonctionnent aussi quand la séparation a le focus.
+- Cliquez sur une ligne pour afficher uniquement cet élément et ses descendants.
 - Cliquez sur une barre, un jalon ou une ligne de la timeline pour repérer l’élément dans la table. La branche affichée est conservée.
 - Les modifications enregistrées dans l’un des panneaux rechargent les données communes depuis Grist.
 
