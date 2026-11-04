@@ -858,6 +858,10 @@
   }
 
   function refreshTimelineRange(reset = false) {
+    if (!nodeById.has(timelineScopeId)) {
+      timelineScopeId = [...treeRoots].sort(compareNodesForTimeline)[0]?.id ?? null;
+      reset = true;
+    }
     const range = computeGlobalRange(scopedTimelineNodes());
     globalMinDate = range.min;
     globalMaxDate = range.max;
@@ -871,7 +875,7 @@
       const children = sortedTimelineChildren(node);
       tracks.push({ kind: "node", node });
       if (!isNodeExpanded(node)) return;
-      if (compactChildren && children.length && children.every((c) => !c.children.length)) {
+      if (compactChildren && children.length && children.every((c) => !c.children.length && c.id !== selectedNodeId)) {
         tracks.push({ kind: "compact", parent: node, nodes: children });
       } else {
         children.forEach(walk);
@@ -2563,11 +2567,27 @@
   }
 
   function selectTimelineScope(nodeId) {
-    if (!nodeById.has(nodeId) || (timelineScopeId === nodeId && selectedNodeId === nodeId)) return;
-    timelineScopeId = nodeId;
+    const node = nodeById.get(nodeId);
+    if (!node) return;
+    const path = ancestorChainForNode(node);
+    const rootId = path[0].id;
+    const changedBranch = timelineScopeId !== rootId;
+    timelineScopeId = rootId;
     selectedNodeId = nodeId;
-    refreshTimelineRange(true);
-    if (viewMode === "timeline") renderTimelinePane();
+    for (const ancestor of path.slice(0, -1)) expandedNodes[ancestor.id] = true;
+    refreshTimelineRange(changedBranch);
+    const start = node.startDate || node.milestoneDate || node.aggStart;
+    const end = node.endDate || node.milestoneDate || node.aggEnd || start;
+    if (start && end && visibleStart && visibleEnd && (end < visibleStart || start > visibleEnd)) {
+      const range = positionRangeAroundReferenceDate(start, diffInDays(visibleStart, visibleEnd) + 1);
+      visibleStart = range.start;
+      visibleEnd = range.end;
+      keepOrRecomputeVisibleRange();
+    }
+    if (viewMode === "timeline") {
+      renderTimelinePane();
+      taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
+    }
     applyNodeSelectionClasses();
   }
 
