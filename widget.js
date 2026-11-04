@@ -1730,7 +1730,6 @@
       await buildDirectMultitableRecords(request);
       const range = computeGlobalRange(allRecords);
       refreshTimelineRange();
-      saveState();
       setDebugStatus(range.hasRecords && !range.hasDateRange
         ? `Mapping interne OK: ${allRecords.length} élément(s), aucune date`
         : `Mapping interne OK: ${allRecords.length} élément(s)`);
@@ -3499,10 +3498,6 @@
       saveDirectMappingConfigToLocalStorage(directMappingConfig);
       renderDirectMappingPanel();
       shouldRender = true;
-    } else if (hasDirectMappingConfig(directMappingConfig)) {
-      // Migration automatique : si le mapping n'existe encore que dans localStorage,
-      // on le copie dans les options propres à cette instance de widget Grist.
-      saveDirectMappingConfigOption(directMappingConfig);
     }
 
     if (widgetState) {
