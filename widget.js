@@ -64,6 +64,7 @@
   let flatTracks = [];
   let nodeById = new Map();
   let expandedNodes = {};
+  let tableExpandedNodes = {};
   let globalMinDate = null;
   let globalMaxDate = null;
   let visibleStart = null;
@@ -72,6 +73,7 @@
   let labelsVisible = true;
   let compactChildren = false;
   let allowEditing = false;
+  let tableAllowEditing = false;
   let viewMode = "timeline";
   let timelineScopes = [];
   let tableSelection = new Set();
@@ -183,12 +185,14 @@
       labelsVisible,
       compactChildren,
       allowEditing,
+      tableAllowEditing,
       viewMode,
       selectedViewMode: viewMode,
       timelineSortField,
       tableVisibleFields,
       tableColumnFilters,
       expandedNodes,
+      tableExpandedNodes,
       visibleStart: visibleStart ? toGristDateString(visibleStart) : null,
       visibleEnd: visibleEnd ? toGristDateString(visibleEnd) : null
     };
@@ -209,7 +213,10 @@
     if (isValidDateSortField(savedTimelineSortField)) timelineSortField = savedTimelineSortField;
     if (Array.isArray(s.tableVisibleFields)) tableVisibleFields = sanitizeTableVisibleFields(s.tableVisibleFields);
     if (s.tableColumnFilters && typeof s.tableColumnFilters === "object") tableColumnFilters = sanitizeTableColumnFilters(s.tableColumnFilters);
-    if (s.expandedNodes && typeof s.expandedNodes === "object") expandedNodes = s.expandedNodes;
+    tableAllowEditing = typeof s.tableAllowEditing === "boolean" ? s.tableAllowEditing : allowEditing;
+    if (s.expandedNodes && typeof s.expandedNodes === "object") expandedNodes = { ...s.expandedNodes };
+    const savedTableExpansion = s.tableExpandedNodes ?? s.expandedNodes;
+    if (savedTableExpansion && typeof savedTableExpansion === "object") tableExpandedNodes = { ...savedTableExpansion };
     if (s.visibleStart) visibleStart = normalizeDate(s.visibleStart);
     if (s.visibleEnd) visibleEnd = normalizeDate(s.visibleEnd);
   }
@@ -840,9 +847,9 @@
     timelineGridEl.innerHTML = `<div class="empty">${escapeHtml(NO_DATE_RANGE_MESSAGE)}</div>`;
   }
 
-  function isNodeExpanded(node) {
+  function isNodeExpanded(node, expansion = expandedNodes) {
     if (!node.children.length) return false;
-    return expandedNodes[node.id] !== false;
+    return expansion[node.id] !== false;
   }
 
   function scopedTimelineNodes() {
@@ -861,7 +868,7 @@
       const root = ancestorChainForNode(nodeById.get(id))[0];
       if (root) roots.add(root);
     }
-    if (!roots.size && treeRoots.length) roots.add([...treeRoots].sort(compareNodesForTimeline)[0]);
+    if (!roots.size && treeRoots.length) roots.add([...treeRoots].sort(sortNodes)[0]);
     const nextScopes = [...roots].sort(compareNodesForTimeline);
     reset ||= nextScopes.length !== timelineScopes.length
       || nextScopes.some((root, index) => root.id !== timelineScopes[index].id);
@@ -885,7 +892,7 @@
         children.forEach(walk);
       }
     }
-    timelineScopes.forEach(walk);
+    [...timelineScopes].sort(compareNodesForTimeline).forEach(walk);
     flatTracks = tracks;
     return tracks;
   }
@@ -995,7 +1002,7 @@
     if (visibleStart < minAllowed) { visibleStart = new Date(minAllowed.getTime()); visibleEnd = addDays(visibleStart, span - 1); }
     if (visibleEnd > maxAllowed) { visibleEnd = new Date(maxAllowed.getTime()); visibleStart = addDays(visibleEnd, -span + 1); }
     saveState();
-    render();
+    renderTimelinePane();
   }
 
   function recomputeCellWidth(totalDays) {
@@ -1183,7 +1190,8 @@
         e.stopPropagation();
         expandedNodes[node.id] = !isNodeExpanded(node);
         saveState();
-        render();
+        renderTimelinePane();
+        updateExpandAllButton();
       });
       row.addEventListener("click", () => selectNodeLocally(node));
 
@@ -2377,8 +2385,8 @@
     throw new Error("Aucune cible d’écriture. Configurez le mapping interne avec la table, la ligne et la colonne source du niveau.");
   }
 
-  async function updateNodeDates(node, newStart, newEnd) {
-    if (!allowEditing) throw new Error("L’édition est bloquée.");
+  async function updateNodeDates(node, newStart, newEnd, editingEnabled = allowEditing) {
+    if (!editingEnabled) throw new Error("L’édition est bloquée.");
     const sourceFields = {};
     if (newStart !== undefined && node.source.startCol) sourceFields[node.source.startCol] = toGristDateString(newStart);
     if (newEnd !== undefined && node.source.endCol) sourceFields[node.source.endCol] = toGristDateString(newEnd);
@@ -2424,12 +2432,12 @@
     return rawValue;
   }
 
-  async function updateTooltipField(node, field, rawValue) {
-    if (!allowEditing) throw new Error("L’édition est bloquée.");
+  async function updateTooltipField(node, field, rawValue, editingEnabled = allowEditing) {
+    if (!editingEnabled) throw new Error("L’édition est bloquée.");
     if (field === "start" || field === "end") {
       if (!fieldSourceColumn(node, field)) throw new Error("Aucune colonne source n’est configurée pour cette date.");
       const date = normalizeDate(rawValue);
-      await updateNodeDates(node, field === "start" ? date : undefined, field === "end" ? date : undefined);
+      await updateNodeDates(node, field === "start" ? date : undefined, field === "end" ? date : undefined, editingEnabled);
       return;
     }
 
@@ -2505,10 +2513,6 @@
     setDebugSyncMode(latestWriteSummary);
   }
 
-  function hasCollapsibleNodes() {
-    return allRecords.some((n) => n.children.length);
-  }
-
   function readTooltipEditValue(input) {
     if (!input) return tooltipState.draftValue;
     if (input.tagName === "SELECT" && input.multiple) {
@@ -2517,27 +2521,25 @@
     return input.value;
   }
 
-  function areAllCollapsibleNodesExpanded() {
-    const nodesWithChildren = allRecords.filter((n) => n.children.length);
-    return nodesWithChildren.length > 0 && nodesWithChildren.every((n) => expandedNodes[n.id] !== false);
-  }
-
   function updateExpandAllButton() {
-    const label = areAllCollapsibleNodesExpanded() ? "Tout plier" : "Tout déplier";
-    const disabled = !hasCollapsibleNodes();
-    [expandAllBtn, tableExpandAllBtn].forEach((btn) => {
-      if (!btn) return;
-      btn.textContent = label;
-      btn.disabled = disabled;
-    });
+    for (const [button, nodes, expansion] of [
+      [expandAllBtn, scopedTimelineNodes(), expandedNodes],
+      [tableExpandAllBtn, allRecords, tableExpandedNodes]
+    ]) {
+      if (!button) continue;
+      const parents = nodes.filter((node) => node.children.length);
+      button.disabled = !parents.length;
+      button.textContent = parents.length && parents.every((node) => isNodeExpanded(node, expansion))
+        ? "Tout plier" : "Tout déplier";
+    }
   }
 
   function updateEditButtons() {
-    [toggleDateEditBtn, tableToggleEditBtn].forEach((btn) => {
-      if (!btn) return;
-      btn.textContent = allowEditing ? "Édition autorisée" : "Édition bloquée";
-      btn.classList.toggle("active", allowEditing);
-    });
+    for (const [button, enabled] of [[toggleDateEditBtn, allowEditing], [tableToggleEditBtn, tableAllowEditing]]) {
+      if (!button) continue;
+      button.textContent = enabled ? "Édition autorisée" : "Édition bloquée";
+      button.classList.toggle("active", enabled);
+    }
   }
 
   function clearNodeSelectionClasses() {
@@ -2568,6 +2570,7 @@
   function selectNodeLocally(node) {
     if (!node) return;
     selectedNodeId = node.id;
+    for (const ancestor of ancestorChainForNode(node).slice(0, -1)) tableExpandedNodes[ancestor.id] = true;
     TableView.renderTableView();
     applyNodeSelectionClasses();
     hierarchyTableWrapEl?.querySelector(`tr[data-node-id="${CSS.escape(node.id)}"]`)?.scrollIntoView({ block: "nearest" });
@@ -2609,6 +2612,7 @@
     }
     if (viewMode === "timeline") {
       renderTimelinePane();
+      updateExpandAllButton();
       if (selectedNodeId) taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
     }
     applyNodeSelectionClasses();
@@ -2640,7 +2644,6 @@
       addLevel1Btn.disabled = !canAddLevel(1);
     }
     if (tableAddLevel1Btn) tableAddLevel1Btn.disabled = !canAddLevel(1);
-    if (tableExpandAllBtn) tableExpandAllBtn.disabled = !hasCollapsibleNodes();
     updateEditButtons();
     const timelineOnly = [expandAllBtn, prevBtn, nextBtn, todayBtn, toggleSidebarBtn, toggleLabelsBtn, groupChildrenBtn, toggleDateEditBtn];
     timelineOnly.forEach((btn) => { if (btn) btn.hidden = viewMode !== "timeline"; });
@@ -2742,12 +2745,12 @@
       const matchesSubtree = !filtered || matchesSelf || (node.children || []).some(subtreeMatchesTableFilters) || selectedPath.has(node.id);
       if (!matchesSubtree) return;
       rows.push(node);
-      const expanded = filtered || isNodeExpanded(node);
-      for (const child of sortedTimelineChildren(node)) {
-        if (expanded || hasLinkedSelectionInSubtree(child) || selectedPath.has(child.id)) walk(child);
+      const expanded = filtered || isNodeExpanded(node, tableExpandedNodes);
+      for (const child of sortedDefaultChildren(node)) {
+        if (expanded || hasLinkedSelectionInSubtree(child)) walk(child);
       }
     }
-    [...treeRoots].sort(compareNodesForTimeline).forEach((root) => walk(root));
+    [...treeRoots].sort(sortNodes).forEach((root) => walk(root));
     return rows;
   }
 
@@ -2823,7 +2826,7 @@
   }
 
   function tableFieldEditable(node, field) {
-    if (!allowEditing) return false;
+    if (!tableAllowEditing) return false;
     if (!fieldSourceColumn(node, field)) return false;
     if (field === "end" && !node.source.endCol) return false;
     return true;
@@ -2900,7 +2903,7 @@
     const body = rows.map((node) => {
       const color = getColorForNode(node);
       const pad = 10 + (node.level - 1) * 24;
-      const toggle = `<button type="button" class="table-expander" data-table-toggle="${escapeHtml(node.id)}" ${node.children.length ? "" : "disabled"}>${node.children.length ? (isNodeExpanded(node) ? "▾" : "▸") : ""}</button>`;
+      const toggle = `<button type="button" class="table-expander" data-table-toggle="${escapeHtml(node.id)}" ${node.children.length ? "" : "disabled"}>${node.children.length ? (isNodeExpanded(node, tableExpandedNodes) ? "▾" : "▸") : ""}</button>`;
       const cells = tableFields.map((col, index) => {
         if (col.field === "name") {
           const nameCell = `<div class="table-name-cell" style="padding-left:${pad}px"><span class="level-pill" style="background:${escapeHtml(color)}"></span>${toggle}<span class="table-level-label">N${node.level}</span>${buildTableInput(node, "name")}</div>`;
@@ -2929,13 +2932,13 @@
 
   function canAddLevel(level) {
     const cfg = directMappingConfig.levels[level];
-    if (!allowEditing || !cfg?.tableId || !cfg.nameCol) return false;
+    if (!tableAllowEditing || !cfg?.tableId || !cfg.nameCol) return false;
     if (level > 1 && !cfg.parentCol) return false;
     return true;
   }
 
   function canDeleteNode(node) {
-    return !!(allowEditing && node?.source?.tableId && node.source.rowId != null);
+    return !!(tableAllowEditing && node?.source?.tableId && node.source.rowId != null);
   }
 
   function parentValueForAdd(level, parentNode) {
@@ -2974,7 +2977,7 @@
     await grist.docApi.applyUserActions([["AddRecord", cfg.tableId, null, fields]]);
     setDebugSyncMode("docApi.applyUserActions (ajout table source)");
     setDebugAction(`Add ${cfg.tableId}: ${Object.keys(fields).join(", ")}`);
-    if (parentNode) expandedNodes[parentNode.id] = true;
+    if (parentNode) tableExpandedNodes[parentNode.id] = true;
     await scheduleDirectMappingRefresh("write");
     showToast(`Niveau ${level} ajouté`, "success");
   }
@@ -3001,6 +3004,7 @@
 
 
   function renderTimelinePane() {
+    if (!allRecords.length) return;
     TimelineView.renderTaskList();
     if (!timelineScopes.length) {
       resetTimelineViewportForNoDateRange();
@@ -3033,11 +3037,16 @@
     saveState();
   }
 
-  function toggleAllNodes() {
-    const shouldExpand = !areAllCollapsibleNodesExpanded();
-    allRecords.forEach((n) => { if (n.children.length) expandedNodes[n.id] = shouldExpand; });
+  function toggleAllNodes(inTable) {
+    const nodes = inTable ? allRecords : scopedTimelineNodes();
+    const expansion = inTable ? tableExpandedNodes : expandedNodes;
+    const parents = nodes.filter((node) => node.children.length);
+    const shouldExpand = !parents.every((node) => isNodeExpanded(node, expansion));
+    for (const node of parents) expansion[node.id] = shouldExpand;
     saveState();
-    render();
+    if (inTable) renderTableView();
+    else renderTimelinePane();
+    updateExpandAllButton();
   }
 
   async function handleAddLevel1() {
@@ -3091,9 +3100,10 @@
       if (toggle) {
         const node = nodeById.get(toggle.dataset.tableToggle);
         if (!node) return;
-        expandedNodes[node.id] = !isNodeExpanded(node);
+        tableExpandedNodes[node.id] = !isNodeExpanded(node, tableExpandedNodes);
         saveState();
-        render();
+        renderTableView();
+        updateExpandAllButton();
         return;
       }
 
@@ -3153,7 +3163,7 @@
       const field = input.dataset.field;
       if (!node || !field) return;
       try {
-        await updateTooltipField(node, field, readTableEditValue(input));
+        await updateTooltipField(node, field, readTableEditValue(input), tableAllowEditing);
         showToast("Champ mis à jour dans la table source", "success");
       } catch (err) {
         console.error(err);
@@ -3329,13 +3339,13 @@
       updateZoomButtons();
       setVisibleRangeForZoom();
       saveState();
-      render();
+      renderTimelinePane();
     });
   });
 
   prevBtn.addEventListener("click", () => shiftVisibleRange("left"));
   nextBtn.addEventListener("click", () => shiftVisibleRange("right"));
-  todayBtn.addEventListener("click", () => { setVisibleRangeForZoom(); saveState(); render(); });
+  todayBtn.addEventListener("click", () => { setVisibleRangeForZoom(); saveState(); renderTimelinePane(); });
   toggleSidebarBtn.addEventListener("click", () => {
     const collapsed = ganttContainer.classList.toggle("sidebar-collapsed");
     toggleSidebarBtn.textContent = collapsed ? "Afficher liste" : "Masquer liste";
@@ -3344,25 +3354,31 @@
     labelsVisible = !labelsVisible;
     toggleLabelsBtn.textContent = labelsVisible ? "Masquer labels" : "Afficher labels";
     saveState();
-    render();
+    renderTimelinePane();
   });
   groupChildrenBtn.addEventListener("click", () => {
     compactChildren = !compactChildren;
     groupChildrenBtn.textContent = compactChildren ? "Niveaux bas : 1 ligne" : "Niveaux bas : multi-lignes";
     saveState();
-    render();
+    renderTimelinePane();
   });
   toggleDateEditBtn.addEventListener("click", toggleEditing);
-  tableToggleEditBtn?.addEventListener("click", toggleEditing);
+  tableToggleEditBtn?.addEventListener("click", () => {
+    tableAllowEditing = !tableAllowEditing;
+    saveState();
+    updateEditButtons();
+    if (tableAddLevel1Btn) tableAddLevel1Btn.disabled = !canAddLevel(1);
+    renderTableView();
+  });
   timelineDateSortSelect?.addEventListener("change", (e) => {
     const nextSort = isValidDateSortField(e.target.value) ? e.target.value : "default";
     timelineSortField = nextSort;
     flatTracks = [];
     saveState();
-    render();
+    renderTimelinePane();
   });
-  expandAllBtn.addEventListener("click", toggleAllNodes);
-  tableExpandAllBtn?.addEventListener("click", toggleAllNodes);
+  expandAllBtn.addEventListener("click", () => toggleAllNodes(false));
+  tableExpandAllBtn?.addEventListener("click", () => toggleAllNodes(true));
   document.getElementById("tableSelectAllBtn")?.addEventListener("click", () => {
     const rows = hasActiveTableFilters() ? allRecords.filter(nodeMatchesTableFilters) : allRecords;
     if (!rows.length) return;
@@ -3372,7 +3388,7 @@
     refreshTimelineRange();
     render();
   });
-  colorFieldSelect.addEventListener("change", (e) => { colorField = e.target.value; saveState(); render(); });
+  colorFieldSelect.addEventListener("change", (e) => { colorField = e.target.value; saveState(); renderTimelinePane(); });
   tableFieldSelectBtn?.addEventListener("click", (e) => {
     e.stopPropagation();
     const isOpen = tableFieldSelectBtn.getAttribute("aria-expanded") === "true";
