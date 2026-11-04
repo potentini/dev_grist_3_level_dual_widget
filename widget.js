@@ -2574,13 +2574,17 @@
     setDebugAction(`Sélection locale ${node.source.tableId || "source"}#${node.source.rowId ?? "?"}`);
   }
 
-  function selectTimelineScope(nodeId, extendSelection) {
+  function selectTimelineScope(nodeId, extendSelection, toggleSelection) {
     const node = nodeById.get(nodeId);
     if (!node) return;
     const rows = extendSelection ? visibleTableRows() : [];
     const anchorIndex = rows.findIndex((row) => row.id === tableSelectionAnchor);
     const clickedIndex = rows.findIndex((row) => row.id === nodeId);
-    if (anchorIndex >= 0 && clickedIndex >= 0) {
+    if (toggleSelection) {
+      if (tableSelection.has(nodeId)) tableSelection.delete(nodeId);
+      else tableSelection.add(nodeId);
+      tableSelectionAnchor = nodeId;
+    } else if (anchorIndex >= 0 && clickedIndex >= 0) {
       const first = Math.min(anchorIndex, clickedIndex);
       const last = Math.max(anchorIndex, clickedIndex);
       tableSelection = new Set(rows.slice(first, last + 1).map((row) => row.id));
@@ -2588,7 +2592,7 @@
       tableSelection = new Set([nodeId]);
       tableSelectionAnchor = nodeId;
     }
-    selectedNodeId = nodeId;
+    selectedNodeId = tableSelection.has(nodeId) ? nodeId : null;
     for (const id of tableSelection) {
       for (const ancestor of ancestorChainForNode(nodeById.get(id)).slice(0, -1)) {
         expandedNodes[ancestor.id] = true;
@@ -2597,7 +2601,7 @@
     refreshTimelineRange();
     const start = node.startDate || node.milestoneDate || node.aggStart;
     const end = node.endDate || node.milestoneDate || node.aggEnd || start;
-    if (start && end && visibleStart && visibleEnd && (end < visibleStart || start > visibleEnd)) {
+    if (selectedNodeId && start && end && visibleStart && visibleEnd && (end < visibleStart || start > visibleEnd)) {
       const range = positionRangeAroundReferenceDate(start, diffInDays(visibleStart, visibleEnd) + 1);
       visibleStart = range.start;
       visibleEnd = range.end;
@@ -2605,7 +2609,7 @@
     }
     if (viewMode === "timeline") {
       renderTimelinePane();
-      taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
+      if (selectedNodeId) taskListEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.scrollIntoView({ block: "nearest" });
     }
     applyNodeSelectionClasses();
   }
@@ -3121,8 +3125,9 @@
 
       const row = e.target.closest("tr[data-node-id]");
       if (row) {
-        if (e.shiftKey && !e.target.closest(".table-cell-editor")) e.preventDefault();
-        selectTimelineScope(row.dataset.nodeId, e.shiftKey);
+        const toggleSelection = e.ctrlKey || e.metaKey;
+        if ((e.shiftKey || toggleSelection) && !e.target.closest(".table-cell-editor")) e.preventDefault();
+        selectTimelineScope(row.dataset.nodeId, e.shiftKey, toggleSelection);
       }
     });
 
