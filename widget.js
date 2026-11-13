@@ -19,6 +19,7 @@
     { key: "level3", level: 3, label: "Niveau 3", required: false }
   ];
 
+  if (document.documentElement.dataset.projectPopup === "true") LEVELS.push({key:"level4",level:4,label:"Actions",required:false});
   const FIELD_LABELS = {
     level: "Niveau",
     name: "Nom",
@@ -35,10 +36,11 @@
   const DAY_VIEW_CELL_WIDTH = 32;
   const NO_DATE_RANGE_MESSAGE = "Les éléments du niveau 1 sont chargés, mais aucune date n’est mappée ou renseignée. Mappez Date début/Date fin pour afficher les barres de timeline.";
 
-  const STORAGE_KEY = "grist_gantt_dual_state_v1";
+  const POPUP_SUFFIX = document.documentElement.dataset.projectPopup === "true" ? "_project_popup" : "";
+  const STORAGE_KEY = "grist_gantt_dual_state_v1" + POPUP_SUFFIX;
   const WIDGET_STATE_OPTION_KEY = "uiState";
   const DIRECT_MAPPING_OPTION_KEY = "directMapping";
-  const DIRECT_MAPPING_STORAGE_KEY = "grist_gantt_dual_mapping_v1";
+  const DIRECT_MAPPING_STORAGE_KEY = "grist_gantt_dual_mapping_v1" + POPUP_SUFFIX;
   const DIRECT_FIELDS = ["name", "start", "end", "status", "responsible", "progress"];
   const DIRECT_FIELD_AUTOMAP_LABELS = {
     name: ["Titre"],
@@ -79,6 +81,7 @@
   let tableSelection = new Set();
   let tableSelectionAnchor = null;
   let timelineSortField = "default";
+  let hierarchySort = HierarchySort.normalize();
   let tableVisibleFields = [...TABLE_DEFAULT_VISIBLE_FIELDS];
   let tableColumnFilters = {};
   let openTableFilterField = null;
@@ -632,13 +635,18 @@
   }
 
   function rawValueForField(node, field) {
+    if (field === "progress") return node.progress == null ? "" : Number(node.progress.toFixed(10));
     return node?.fieldRawValues && Object.prototype.hasOwnProperty.call(node.fieldRawValues, field)
       ? node.fieldRawValues[field]
       : fieldDisplayValue(node, field);
   }
 
-  function parseProgress(value) {
+  function parseProgress(value, baseOne) {
     if (value == null || value === "") return null;
+    if (typeof baseOne === "boolean") {
+      const n = Number(String(value).trim().replace(",", "."));
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, n * (baseOne ? 100 : 1))) : null;
+    }
     if (typeof value === "string") {
       const cleaned = value.replace("%", "").replace(",", ".").trim();
       if (!cleaned) return null;
@@ -705,6 +713,7 @@
       startCol: target.source.startCol || duplicate.source.startCol || null,
       endCol: target.source.endCol || duplicate.source.endCol || null,
       progressCol: target.source.progressCol || duplicate.source.progressCol || null,
+      progressBaseOne: target.source.progressBaseOne ?? duplicate.source.progressBaseOne,
       nameCol: target.source.nameCol || duplicate.source.nameCol || null,
       statusCol: target.source.statusCol || duplicate.source.statusCol || null,
       responsibleCol: target.source.responsibleCol || duplicate.source.responsibleCol || null,
@@ -791,6 +800,7 @@
       startCol: node.source.startCol || data.source.startCol || null,
       endCol: node.source.endCol || data.source.endCol || null,
       progressCol: node.source.progressCol || data.source.progressCol || null,
+      progressBaseOne: node.source.progressBaseOne ?? data.source.progressBaseOne,
       nameCol: node.source.nameCol || data.source.nameCol || null,
       statusCol: node.source.statusCol || data.source.statusCol || null,
       responsibleCol: node.source.responsibleCol || data.source.responsibleCol || null,
@@ -799,11 +809,14 @@
     node.fallbackAliases = data.fallbackAliases || node.fallbackAliases;
   }
 
+  function hierarchyDescriptor(node) {
+    const childDates=key=>(node.children||[]).map(child=>hierarchyDescriptor(child)[key]).filter(value=>value!==null);
+    const starts=childDates('start'),ends=childDates('end');
+    return {id:node.source?.rowId ?? node.id,title:node.label,start:HierarchySort.date(node.startDate) ?? (starts.length?Math.min(...starts):null),end:HierarchySort.date(node.endDate) ?? (ends.length?Math.max(...ends):null),priority:node.sortPriority ?? null,manual:node.order ?? node.source?.rowId ?? node.sourceIndex};
+  }
   function sortNodes(a, b) {
-    const ao = a.order != null ? a.order : Infinity;
-    const bo = b.order != null ? b.order : Infinity;
-    if (ao !== bo) return ao - bo;
-    return sourceOrderComparison(a, b);
+    if ((a.level===1)!==(b.level===1)) return a.level===1?-1:1;
+    return HierarchySort.compare(hierarchyDescriptor(a),hierarchyDescriptor(b),hierarchySort[a.level===1?'projects':'children']);
   }
 
   function sourceOrderComparison(a, b) {
@@ -1048,7 +1061,7 @@
     if (colorField === "name") return node.label;
     if (colorField === "status") return node.status;
     if (colorField === "responsible") return node.responsible;
-    if (colorField === "progress") return node.progress == null ? "" : `${Math.round(node.progress)}%`;
+    if (colorField === "progress") return node.progress == null ? "" : `${Number(node.progress.toFixed(10))}%`;
     if (colorField === "sourceTable") return node.source.tableId || "";
     if (colorField === "start") return node.aggStart ? toGristDateString(node.aggStart) : "";
     if (colorField === "end") return node.aggEnd ? toGristDateString(node.aggEnd) : "";
@@ -1151,7 +1164,7 @@
     if (node.aggStart || node.aggEnd) parts.push(`${formatDateShort(node.aggStart || node.aggEnd)} – ${formatDateShort(node.aggEnd || node.aggStart)}`);
     if (node.status) parts.push(node.status);
     if (node.responsible) parts.push(node.responsible);
-    if (node.progress != null) parts.push(`${Math.round(node.progress)}%`);
+    if (node.progress != null) parts.push(`${Number(node.progress.toFixed(10))}%`);
     if (node.source.tableId) parts.push(`↳ ${node.source.tableId}`);
     return parts.join(" · ");
   }
@@ -1389,6 +1402,7 @@
       startCol: cfg.startCol || null,
       endCol: cfg.endCol || null,
       progressCol: cfg.progressCol || null,
+      progressBaseOne: cfg.progressBaseOne,
       nameCol: cfg.nameCol || null,
       statusCol: cfg.statusCol || null,
       responsibleCol: cfg.responsibleCol || null,
@@ -1407,13 +1421,15 @@
       sourceRowId: rowId,
       source
     });
+    node.order = row[cfg.orderCol] ?? row.manualSort ?? rowId;
+    node.sortPriority = HierarchySort.priority(row[cfg.priorityCol],sourceColumnMetaCache.get(metadataKey(cfg.tableId,cfg.priorityCol))?.choices||[]);
     node.startDate = startDate;
     node.endDate = endDate;
     node.explicitDates = !!(startDate || endDate);
     node.status = String(directFieldValue(row, cfg, "status") || "");
     const responsibleRaw = directFieldValue(row, cfg, "responsible");
     node.responsible = displayValueForField(responsibleRaw);
-    node.progress = parseProgress(directFieldValue(row, cfg, "progress"));
+    node.progress = parseProgress(directFieldValue(row, cfg, "progress"), cfg.progressBaseOne);
     node.fieldRawValues = {
       name: directFieldValue(row, cfg, "name"),
       status: directFieldValue(row, cfg, "status"),
@@ -1497,7 +1513,7 @@
   }
 
   async function directRowsForLevel(cfg, refresh = {}) {
-    const sourceRows = await fetchDirectTableRows(cfg.tableId, refresh);
+    const sourceRows = (await fetchDirectTableRows(cfg.tableId, refresh)).filter(row => (!cfg.archivedCol || ![true,1,"true"].includes(row[cfg.archivedCol])) && (!cfg.manualArchivedCol || ![true,1,"true"].includes(row[cfg.manualArchivedCol])));
     if (!isDirectLevelDrivenByCurrentView(cfg)) return { rows: sourceRows, sourceRows, isConstrained: false };
 
     const sourceRowsById = new Map();
@@ -1713,7 +1729,8 @@
         const node = current.byRowId.get(rowId);
         if (!node) continue;
         const parentIds = directParentIds(row, current.cfg.parentCol);
-        const parentNode = parentIds.map((id) => parent?.byRowId.get(id)).find(Boolean);
+        const effectiveParent = document.documentElement.dataset.projectPopup === "true" && row.__popupParentLevel ? levelNodes.get(row.__popupParentLevel) : parent;
+        const parentNode = parentIds.map((id) => effectiveParent?.byRowId.get(id)).find(Boolean);
         if (parentNode) {
           node.parentId = parentNode.id;
           parentNode.children.push(node);
@@ -1843,7 +1860,7 @@
       if (meta?.refTableId && raw != null && refOptionsCache.has(refOptionsKey(meta))) return labelForRefValue(meta, raw) || node.responsible || "";
       return node.responsible || "";
     }
-    if (field === "progress") return node.progress == null ? "" : Math.round(node.progress);
+    if (field === "progress") return node.progress == null ? "" : Number(node.progress.toFixed(10));
     if (field === "start") return formatDate(node.startDate || node.milestoneDate || node.aggStart);
     if (field === "end") return formatDate(node.endDate || node.aggEnd || node.milestoneDate);
     return "";
@@ -1856,7 +1873,7 @@
       { field: "end", label: "Fin", value: formatDate(node.endDate), editable: allowEditing && !!fieldSourceColumn(node, "end") },
       { field: "status", label: "Statut", value: fieldDisplayValue(node, "status"), editable: allowEditing },
       { field: "responsible", label: "Responsable", value: fieldDisplayValue(node, "responsible"), editable: allowEditing },
-      { field: "progress", label: "Avancement", value: node.progress == null ? "" : `${Math.round(node.progress)}%`, editable: allowEditing },
+      { field: "progress", label: "Avancement", value: node.progress == null ? "" : `${Number(node.progress.toFixed(10))}%`, editable: allowEditing },
       ...Object.values(node.extraFields || {}).map((extra) => ({
         field: fieldKeyForExtra(extra),
         label: extra.label,
@@ -1989,7 +2006,7 @@
     } else if ((baseType === "Ref" || baseType === "RefList") && row.meta?.refTableId) {
       input = buildRefInput(row, raw);
     } else if (row.field === "progress" || baseType === "Numeric" || baseType === "Int" || baseType === "Ref") {
-      const attrs = row.field === "progress" ? ' min="0" max="100" step="1"' : ' step="any"';
+      const attrs = row.field === "progress" ? ' min="0" max="100" step="any"' : ' step="any"';
       input = `<input data-edit-input type="number"${attrs} value="${escapeHtml(raw)}" />`;
     } else if (baseType === "Bool") {
       const checked = raw === true || String(raw).toLowerCase() === "true" || String(raw).toLowerCase() === "oui" || String(raw) === "1";
@@ -2197,7 +2214,7 @@
       if (node.progress != null) {
         const progress = document.createElement("span");
         progress.className = "bar-progress";
-        progress.style.width = Math.round(node.progress) + "%";
+        progress.style.width = Number(node.progress.toFixed(10)) + "%";
         bar.appendChild(progress);
       }
       if (labelsVisible && !hideLabel) {
@@ -2403,7 +2420,7 @@
       if (String(rawValue).trim() === "") return null;
       const n = Number(String(rawValue).replace(",", "."));
       if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error("L’avancement doit être un nombre entre 0 et 100.");
-      return n;
+      return node.source.progressBaseOne === true ? n / 100 : n;
     }
 
     const meta = sourceColumnMeta(node, field);
@@ -2483,7 +2500,7 @@
     else if (field === "responsible") {
       const meta = sourceColumnMeta(node, field);
       node.responsible = (meta?.refTableId ? labelForRefValue(meta, value) : displayValueForField(value)) || "";
-    } else if (field === "progress") node.progress = parseProgress(value);
+    } else if (field === "progress") node.progress = parseProgress(value, node.source.progressBaseOne);
   }
 
   function applyLocalDateChange(node, newStart, newEnd) {
@@ -2537,6 +2554,8 @@
   function updateEditButtons() {
     for (const [button, enabled] of [[toggleDateEditBtn, allowEditing], [tableToggleEditBtn, tableAllowEditing]]) {
       if (!button) continue;
+      if (document.documentElement.dataset.projectPopup === "true") button.disabled = false;
+      button.setAttribute("aria-pressed", String(enabled));
       button.textContent = enabled ? "Édition autorisée" : "Édition bloquée";
       button.classList.toggle("active", enabled);
     }
@@ -2619,17 +2638,10 @@
   }
 
   function updateTimelineDateSortSelect() {
-    if (!timelineDateSortSelect) return;
-    const dateOptions = LEVELS.flatMap((levelInfo) => [
-      { value: `dateStart${levelInfo.level}`, label: `DateDebut${levelInfo.level}` },
-      { value: `dateEnd${levelInfo.level}`, label: `DateFin${levelInfo.level}` }
-    ]);
-    const options = [{ value: "default", label: "Ordre par défaut" }, ...dateOptions];
-    const html = options.map((option) =>
-      `<option value="${escapeHtml(option.value)}" ${option.value === timelineSortField ? "selected" : ""}>${escapeHtml(option.label)}</option>`
-    ).join("");
-    if (timelineDateSortSelect.innerHTML !== html) timelineDateSortSelect.innerHTML = html;
-    timelineDateSortSelect.value = timelineSortField;
+    for(const [id,scope] of [['projectSortSelect','projects'],['timelineDateSortSelect','children']]) {
+      const select=document.getElementById(id);if(!select)continue;
+      select.innerHTML=HierarchySort.options.map(([key,label])=>`<option value="${key}" ${key==='priority' && !(scope==='projects'?[1]:LEVELS.filter(l=>l.level>1).map(l=>l.level)).some(level=>directMappingConfig.levels[level]?.priorityCol)?'disabled':''}>${label}</option>`).join('');select.value=hierarchySort[scope];
+    }
   }
 
   function updateViewModeButtons() {
@@ -2689,19 +2701,7 @@
     return selected;
   }
 
-  function compareNodesForTimeline(a, b) {
-    const config = timelineSortConfig();
-    if (!config) return sortNodes(a, b);
-    const ad = dateValueForTimelineSort(a, config);
-    const bd = dateValueForTimelineSort(b, config);
-    if (ad && bd) {
-      const diff = ad.getTime() - bd.getTime();
-      if (diff) return diff;
-    } else if (ad || bd) {
-      return ad ? -1 : 1;
-    }
-    return sortNodes(a, b);
-  }
+  function compareNodesForTimeline(a, b) { return sortNodes(a,b); }
 
   function sortedTimelineChildren(node) {
     return [...(node.children || [])].sort(compareNodesForTimeline);
@@ -2757,7 +2757,7 @@
   function tableFieldValue(node, field) {
     if (field === "start") return node.startDate || node.milestoneDate || "";
     if (field === "end") return node.endDate || node.aggEnd || node.milestoneDate || "";
-    if (field === "progress") return node.progress == null ? "" : Math.round(node.progress);
+    if (field === "progress") return node.progress == null ? "" : Number(node.progress.toFixed(10));
     return fieldDisplayValue(node, field);
   }
 
@@ -2877,7 +2877,7 @@
       return `<select ${baseAttrs} ${multiple ? "multiple" : ""}>${empty}${options}</select>`;
     }
     if (field === "progress" || baseType === "Numeric" || baseType === "Int" || baseType === "Ref") {
-      const attrs = field === "progress" ? 'min="0" max="100" step="1"' : 'step="any"';
+      const attrs = field === "progress" ? 'min="0" max="100" step="any"' : 'step="any"';
       return `<input ${baseAttrs} type="number" ${attrs} value="${escapeHtml(raw ?? value ?? "")}" />`;
     }
     if (baseType === "Bool") {
@@ -3028,6 +3028,11 @@
 
   function toggleEditing() {
     allowEditing = !allowEditing;
+    if (document.documentElement.dataset.projectPopup === "true") {
+      tableAllowEditing = allowEditing;
+      grist.setPopupEditing(allowEditing);
+      renderTableView();
+    }
     updateEditButtons();
     if (!allowEditing && tooltipState.editingField) {
       tooltipState.editingField = null;
@@ -3365,17 +3370,19 @@
   toggleDateEditBtn.addEventListener("click", toggleEditing);
   tableToggleEditBtn?.addEventListener("click", () => {
     tableAllowEditing = !tableAllowEditing;
+    if (document.documentElement.dataset.projectPopup === "true") {
+      allowEditing = tableAllowEditing;
+      grist.setPopupEditing(allowEditing);
+    }
     saveState();
     updateEditButtons();
     if (tableAddLevel1Btn) tableAddLevel1Btn.disabled = !canAddLevel(1);
     renderTableView();
   });
-  timelineDateSortSelect?.addEventListener("change", (e) => {
-    const nextSort = isValidDateSortField(e.target.value) ? e.target.value : "default";
-    timelineSortField = nextSort;
-    flatTracks = [];
-    saveState();
-    renderTimelinePane();
+  for(const [id,scope] of [['projectSortSelect','projects'],['timelineDateSortSelect','children']])document.getElementById(id)?.addEventListener('change',async(event)=>{
+    hierarchySort={...hierarchySort,[scope]:event.target.value};flatTracks=[];
+    render();
+    try {await grist.setOption(HierarchySort.key,hierarchySort);}catch(error){showToast(error.message,'error');}
   });
   expandAllBtn.addEventListener("click", () => toggleAllNodes(false));
   tableExpandAllBtn?.addEventListener("click", () => toggleAllNodes(true));
@@ -3449,6 +3456,9 @@
           <div class="row"><label>Statut</label><select data-direct-level="${levelInfo.level}" data-direct-field="statusCol">${columnOptionsHtml(tableId, cfg.statusCol)}</select></div>
           <div class="row"><label>Responsable</label><select data-direct-level="${levelInfo.level}" data-direct-field="responsibleCol">${columnOptionsHtml(tableId, cfg.responsibleCol)}</select></div>
           <div class="row"><label>Avancement</label><select data-direct-level="${levelInfo.level}" data-direct-field="progressCol">${columnOptionsHtml(tableId, cfg.progressCol)}</select></div>
+          <div class="row"><label>Base avancement</label><select data-direct-level="${levelInfo.level}" data-direct-field="progressBaseOne"><option value="auto" ${typeof cfg.progressBaseOne!=='boolean'?'selected':''}>Automatique (ancien comportement)</option><option value="true" ${cfg.progressBaseOne===true?'selected':''}>Base 1 : 0,1 = 10 %</option><option value="false" ${cfg.progressBaseOne===false?'selected':''}>Base 100 : 0,1 = 0,1 %</option></select></div>
+          <div class="row"><label>Priorité (tri)</label><select data-direct-level="${levelInfo.level}" data-direct-field="priorityCol">${columnOptionsHtml(tableId,cfg.priorityCol)}</select></div>
+          <div class="row"><label>Ordre manuel</label><select data-direct-level="${levelInfo.level}" data-direct-field="orderCol">${columnOptionsHtml(tableId,cfg.orderCol)}</select></div>
           ${extraRows}
           <div class="mapping-actions"><button type="button" class="btn btn-small" data-add-extra-field="${levelInfo.level}">+ Ajouter un champ</button></div>
         </fieldset>`;
@@ -3485,9 +3495,9 @@
       const field = select.dataset.directField;
       const cfg = directMappingConfig.levels[level];
       if (!cfg) return;
-      cfg[field] = select.value;
+      cfg[field] = field === "progressBaseOne" ? (select.value==='auto'?undefined:select.value==='true') : select.value;
       if (field === "tableId") {
-        for (const directField of ["parentCol", ...DIRECT_FIELDS.map((name) => `${name}Col`)]) cfg[directField] = "";
+        for (const directField of ["parentCol", "orderCol", "priorityCol", ...DIRECT_FIELDS.map((name) => `${name}Col`)]) cfg[directField] = "";
         cfg.extraFields = [];
         automapDirectLevelConfig(cfg);
       }
@@ -3584,13 +3594,25 @@
   grist.ready({ requiredAccess: "full", allowSelectBy: true });
 
   grist.onOptions(function (options) {
+    hierarchySort=HierarchySort.normalize(options?.[HierarchySort.key]);
+    flatTracks=[];
     const widgetState = options?.[WIDGET_STATE_OPTION_KEY];
     const optionMapping = options?.[DIRECT_MAPPING_OPTION_KEY];
-    let shouldRender = false;
+    let shouldRender = true;
 
     if (optionMapping) {
       const previousMappingSignature = directMappingSignature();
       directMappingConfig = normalizeDirectMappingConfig(optionMapping);
+      const tracking=options?.projectWorkspaceMappingV1;
+      for(const [i,kind] of ['projects','streams','tasks'].entries()) {
+        const source=tracking?.[kind],config=directMappingConfig.levels[i+1];
+        if(!source || source.table!==config?.tableId)continue;
+        for(const [property,field,alias] of [['orderCol','Ordre','order'],['priorityCol','Priorite','priority']]) {
+          const normalize=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/gi,'').toLowerCase();
+          const col=source.fields?.[field] || Object.values(source.fields||{}).find(id=>[normalize(field),alias].includes(normalize(id))) || (source.extraFields||[]).filter(extra=>[normalize(field),alias].includes(normalize(extra.label))).map(extra=>source.fields?.[extra.id]).find(Boolean);
+          if(col)config[property]=col;
+        }
+      }
       if (previousMappingSignature !== directMappingSignature()) invalidateDirectTableCache();
       directMappingModeActive = hasDirectMappingConfig(directMappingConfig);
       if (!directMappingModeActive) clearDirectRecords();
