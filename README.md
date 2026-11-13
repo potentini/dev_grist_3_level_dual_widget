@@ -25,4 +25,4 @@ Dans le mapping interne de chaque niveau, associer si besoin **Priorité (tri)**
 
 Le code Table/Timeline est partagé avec `potentini/grist_project-like`. Pour les prochains reports, utiliser `scripts/export-dual-widget.py` depuis ce dépôt de suivi, puis vérifier les différences avant commit dans ce dépôt. Le script exporte `index.html`, `widget.js`, `hierarchy-sort.js` et `form-theme.css` ; les fonctions propres au suivi ne sont pas nécessaires au widget autonome. Les réglages Grist restent propres à chaque instance ; les modifications des données portent sur les tables sources.
 
-La feuille partagée `form-theme.css` fixe le contraste des champs natifs et des listes de choix, en mode jour et nuit (`prefers-color-scheme`), y compris le texte de saisie automatique des navigateurs WebKit. Elle doit être publiée avec les fichiers du widget.
+La feuille partagée `form-theme.css` impose un texte foncé sur fond blanc dans les champs natifs et les listes de choix, en mode jour comme en mode nuit, y compris le texte de saisie automatique des navigateurs WebKit. Elle doit être publiée avec les fichiers du widget.
